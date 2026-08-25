@@ -1,0 +1,47 @@
+# BLM interlock BRAM packet - must stay in sync with bram_interlock_packet
+# in blmApp/src/blmPLRegDefs.h
+[format]
+name = "blm_interlock_512"
+description = "bram_interlock_packet (64 B)"
+word_bits = 512
+byte_order = "msb-first"
+
+[[field]]
+name = "wr_time_s"
+type = "u32"
+
+[[field]]
+name = "wr_time_ns"
+type = "u32"
+
+[[field]]
+name = "data_id"
+type = "u32"
+radix = "hex"
+
+[[field]]
+name = "lock_addr"
+type = "u32"
+radix = "hex"
+
+[[field]]
+name = "integral"
+type = "i32"
+count = 6
+
+[[field]]
+name = "count"
+type = "u32"
+count = 6
+
+[[rule]]
+when = "any(v < 0 for v in integral)"
+bg = "#f6caca"
+
+[[rule]]
+when = "any(v != 0 for v in count)"
+bg = "#d3ecd3"
+
+[[rule]]
+when = "all(v == 0 for v in integral) and all(v == 0 for v in count)"
+fg = "#9a9a9a"

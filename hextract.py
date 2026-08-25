@@ -1,0 +1,601 @@
+#!/usr/bin/env python3
+"""
+hextract.py - format-driven decoder for hex word dumps (Vivado ILA etc.).
+
+Packet layouts are described declaratively in TOML files (see formats/).
+Runs a live tkinter GUI by default, or decodes headless from the CLI:
+
+    hextract.py                            # GUI
+    hextract.py -f blm_interlock_512 cap.txt
+    hextract.py --list-formats
+
+Requires Python >= 3.11 (tomllib). CLI mode works without tkinter.
+"""
+
+import argparse
+import ast
+import glob
+import os
+import re
+import struct
+import sys
+from dataclasses import dataclass
+from typing import List, Optional, Tuple
+
+try:
+    import tomllib
+except ImportError:
+    tomllib = None
+
+try:
+    import tkinter as tk
+    from tkinter import ttk, filedialog
+    HAVE_TK = True
+except ImportError:
+    HAVE_TK = False
+
+FORMATS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "formats")
+
+TYPE_FMT = {
+    "u8": "B", "u16": "H", "u32": "I", "u64": "Q",
+    "i8": "b", "i16": "h", "i32": "i", "i64": "q",
+    "f32": "f", "f64": "d",
+}
+TYPE_BITS = {t: struct.calcsize(c) * 8 for t, c in TYPE_FMT.items()}
+
+CALL_WHITELIST = {"any", "all", "min", "max", "abs", "len"}
+
+NONHEX = re.compile(r"[^0-9a-fA-F]+")
+PREFIX = re.compile(r"0[xX]")
+
+
+class FormatError(ValueError):
+    pass
+
+
+@dataclass(frozen=True)
+class Field:
+    name: str
+    type: str
+    count: int = 1
+    bits: Optional[Tuple[int, int]] = None  # (hi, lo), hi == lo for single bit
+    radix: Optional[str] = None
+    scale: Optional[float] = None
+
+
+@dataclass(frozen=True)
+class Rule:
+    when_src: str
+    code: object
+    bg: Optional[str] = None
+    fg: Optional[str] = None
+
+
+class PacketFormat:
+    def __init__(self, name, description, word_bits, byte_order, fields, rules):
+        self.name = name
+        self.description = description
+        self.word_bits = word_bits
+        self.byte_order = byte_order
+        self.fields = fields
+        self.rules = rules
+        self._struct = None
+
+    @property
+    def word_bytes(self):
+        return self.word_bits // 8
+
+    def columns(self):
+        cols = []
+        for f in self.fields:
+            if f.count == 1:
+                cols.append(f.name)
+            else:
+                cols.extend("%s%d" % (f.name, i) for i in range(f.count))
+        return cols
+
+    def struct(self):
+        if self._struct is None:
+            s = "<" + "".join(TYPE_FMT[f.type] * f.count for f in self.fields)
+            used = sum(TYPE_BITS[f.type] * f.count for f in self.fields) // 8
+            s += "x" * (self.word_bytes - used)
+            self._struct = struct.Struct(s)
+        return self._struct
+
+
+# ---------------------------------------------------------------- formats
+
+ALLOWED_NODES = {
+    ast.Expression, ast.BoolOp, ast.UnaryOp, ast.BinOp, ast.Compare, ast.Call,
+    ast.Name, ast.Constant, ast.Tuple, ast.List, ast.GeneratorExp,
+    ast.comprehension, ast.Subscript, ast.Slice, ast.Load, ast.Store,
+    ast.And, ast.Or, ast.Not, ast.UAdd, ast.USub,
+    ast.Add, ast.Sub, ast.Mult, ast.Div, ast.FloorDiv, ast.Mod, ast.Pow,
+    ast.BitAnd, ast.BitOr, ast.BitXor, ast.LShift, ast.RShift,
+    ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE,
+}
+
+
+def compile_rule(src, field_names):
+    try:
+        tree = ast.parse(src, mode="eval")
+    except SyntaxError as e:
+        raise FormatError("rule syntax error: %s" % e)
+    comp_names = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.comprehension):
+            for sub in ast.walk(node.target):
+                if isinstance(sub, ast.Name):
+                    comp_names.add(sub.id)
+    for node in ast.walk(tree):
+        if type(node) not in ALLOWED_NODES:
+            raise FormatError("rule uses disallowed construct '%s'" % type(node).__name__)
+        if isinstance(node, ast.Call):
+            if not isinstance(node.func, ast.Name) or node.func.id not in CALL_WHITELIST:
+                raise FormatError("rule calls disallowed function")
+        if isinstance(node, ast.Name):
+            if node.id.startswith("_"):
+                raise FormatError("rule references private name '%s'" % node.id)
+            allowed = field_names | comp_names | CALL_WHITELIST
+            if node.id not in allowed:
+                raise FormatError("rule references unknown name '%s'" % node.id)
+    return compile(tree, "<rule>", "eval")
+
+
+def _parse_bits(value, type_bits):
+    if isinstance(value, bool):
+        raise FormatError("bits must be an int or 'hi:lo' string")
+    if isinstance(value, int):
+        hi = lo = value
+    elif isinstance(value, str) and ":" in value:
+        hi_s, lo_s = value.split(":", 1)
+        try:
+            hi, lo = int(hi_s), int(lo_s)
+        except ValueError:
+            raise FormatError("bits '%s' is not 'hi:lo'" % value)
+    else:
+        raise FormatError("bits must be an int or 'hi:lo' string")
+    if hi < lo or lo < 0 or hi >= type_bits:
+        raise FormatError("bits '%s' out of range for %d-bit type" % (value, type_bits))
+    return hi, lo
+
+
+def load_format(path):
+    try:
+        with open(path, "rb") as fh:
+            data = tomllib.load(fh)
+    except (OSError, tomllib.TOMLDecodeError) as e:
+        raise FormatError(str(e))
+
+    meta = data.get("format")
+    if not isinstance(meta, dict):
+        raise FormatError("missing [format] table")
+    name = meta.get("name")
+    if not isinstance(name, str) or not name:
+        raise FormatError("format.name missing")
+    word_bits = meta.get("word_bits")
+    if not isinstance(word_bits, int) or word_bits <= 0 or word_bits % 8:
+        raise FormatError("format.word_bits must be a positive multiple of 8")
+    byte_order = meta.get("byte_order", "msb-first")
+    if byte_order not in ("msb-first", "raw"):
+        raise FormatError("format.byte_order must be 'msb-first' or 'raw'")
+    description = meta.get("description", "")
+
+    raw_fields = data.get("field")
+    if not isinstance(raw_fields, list) or not raw_fields:
+        raise FormatError("at least one [[field]] is required")
+    fields, seen = [], set()
+    used_bits = 0
+    for i, fd in enumerate(raw_fields):
+        fname = fd.get("name")
+        if not isinstance(fname, str) or not fname:
+            raise FormatError("field %d: name missing" % i)
+        if fname in seen:
+            raise FormatError("field '%s' defined twice" % fname)
+        seen.add(fname)
+        ftype = fd.get("type")
+        if ftype not in TYPE_FMT:
+            raise FormatError("field '%s': unknown type '%s'" % (fname, ftype))
+        count = fd.get("count", 1)
+        if not isinstance(count, int) or isinstance(count, bool) or count < 1:
+            raise FormatError("field '%s': count must be an integer >= 1" % fname)
+        bits = _parse_bits(fd["bits"], TYPE_BITS[ftype]) if "bits" in fd else None
+        radix = fd.get("radix")
+        if radix is not None and radix not in ("hex", "dec"):
+            raise FormatError("field '%s': radix must be 'hex' or 'dec'" % fname)
+        scale = fd.get("scale")
+        if scale is not None and (isinstance(scale, bool) or not isinstance(scale, (int, float))):
+            raise FormatError("field '%s': scale must be a number" % fname)
+        fields.append(Field(fname, ftype, count, bits, radix, scale))
+        used_bits += TYPE_BITS[ftype] * count
+    if used_bits > word_bits:
+        raise FormatError("fields use %d bits but word is %d bits" % (used_bits, word_bits))
+
+    rules = []
+    for i, rd in enumerate(data.get("rule", [])):
+        when = rd.get("when")
+        if not isinstance(when, str) or not when:
+            raise FormatError("rule %d: when missing" % i)
+        bg, fg = rd.get("bg"), rd.get("fg")
+        if bg is None and fg is None:
+            raise FormatError("rule %d: needs bg and/or fg color" % i)
+        for cname, cval in (("bg", bg), ("fg", fg)):
+            if cval is not None and (not isinstance(cval, str) or not cval):
+                raise FormatError("rule %d: %s must be a color string" % (i, cname))
+        rules.append(Rule(when, compile_rule(when, seen), bg, fg))
+
+    return PacketFormat(name, description, word_bits, byte_order, fields, rules)
+
+
+def discover_formats(directory=FORMATS_DIR):
+    return sorted(glob.glob(os.path.join(directory, "*.toml")))
+
+
+def resolve_format(spec):
+    candidates = [spec, spec + ".toml",
+                  os.path.join(FORMATS_DIR, spec),
+                  os.path.join(FORMATS_DIR, spec + ".toml")]
+    for c in candidates:
+        if os.path.isfile(c):
+            return load_format(c)
+    raise FormatError("unknown format '%s' (try --list-formats)" % spec)
+
+
+# ---------------------------------------------------------------- decoding
+
+def sanitize_hex(text):
+    return NONHEX.sub("", PREFIX.sub("", text))
+
+
+def extract_bits(value, bits):
+    hi, lo = bits
+    return (value >> lo) & ((1 << (hi - lo + 1)) - 1)
+
+
+def hex_to_words(text, fmt, reverse=None):
+    """Decode hex text into per-word field dicts.
+
+    Returns (rows, remainder_bytes, error). reverse=None means follow
+    fmt.byte_order.
+    """
+    if reverse is None:
+        reverse = fmt.byte_order == "msb-first"
+    hx = sanitize_hex(text)
+    if not hx:
+        return [], 0, None
+    if len(hx) % 2:
+        return [], 0, "odd number of hex characters"
+    data = bytes.fromhex(hx)
+    wb = fmt.word_bytes
+    n = len(data) // wb
+    if n == 0:
+        return [], len(data), "need %d B per word (%d-bit), got %d B" % (
+            wb, fmt.word_bits, len(data))
+    unpack = fmt.struct().unpack
+    rows = []
+    for i in range(n):
+        chunk = data[i * wb:(i + 1) * wb]
+        if reverse:
+            chunk = chunk[::-1]
+        vals = unpack(chunk)
+        row, pos = {}, 0
+        for f in fmt.fields:
+            take = vals[pos:pos + f.count]
+            pos += f.count
+            if f.bits is not None:
+                take = tuple(extract_bits(v, f.bits) for v in take)
+            row[f.name] = take[0] if f.count == 1 else take
+        rows.append(row)
+    return rows, len(data) % wb, None
+
+
+def eval_rule(rule, env):
+    try:
+        return bool(eval(rule.code, {"__builtins__": {}}, env))
+    except Exception:
+        return False
+
+
+def rule_env(fmt, row):
+    env = {"any": any, "all": all, "min": min, "max": max, "abs": abs, "len": len}
+    env.update(row)
+    return env
+
+
+def format_cell(field, value):
+    if field.scale is not None:
+        value = value * field.scale
+    if field.radix == "hex" and isinstance(value, int) and not isinstance(value, bool):
+        return "-0x%x" % (-value) if value < 0 else "0x%x" % value
+    if isinstance(value, float):
+        return "%g" % value
+    return str(value)
+
+
+# ---------------------------------------------------------------- CLI
+
+def cli_decode(fmt, text, no_header):
+    rows, rem, err = hex_to_words(text, fmt)
+    if err:
+        print("hextract: %s" % err, file=sys.stderr)
+        return 1
+    header = ["#"] + fmt.columns()
+    body = []
+    for i, row in enumerate(rows):
+        cells = [str(i)]
+        for f in fmt.fields:
+            v = row[f.name]
+            if f.count == 1:
+                cells.append(format_cell(f, v))
+            else:
+                cells.extend(format_cell(f, x) for x in v)
+        body.append(cells)
+    widths = []
+    for c, h in enumerate(header):
+        w = len(h)
+        for r in body:
+            w = max(w, len(r[c]))
+        widths.append(w)
+    if body and not no_header:
+        print("  ".join(h.rjust(w) for h, w in zip(header, widths)))
+    for r in body:
+        print("  ".join(cell.rjust(w) for cell, w in zip(r, widths)))
+    if rem:
+        print("hextract: %d trailing bytes ignored" % rem, file=sys.stderr)
+    return 0
+
+
+def cli_list_formats():
+    paths = discover_formats()
+    if not paths:
+        print("no format files in %s" % FORMATS_DIR)
+        return 0
+    for p in paths:
+        try:
+            fmt = load_format(p)
+            print("%-24s %4d-bit  %s" % (fmt.name, fmt.word_bits, fmt.description))
+        except FormatError as e:
+            print("%-24s BROKEN: %s" % (os.path.basename(p), e))
+    return 0
+
+
+# ---------------------------------------------------------------- GUI
+
+class App:
+    TAG_STRIPE = "#f2f4f8"
+
+    def __init__(self, root):
+        self.root = root
+        root.title("hextract")
+
+        self.formats = {}
+        self.reverse_var = tk.BooleanVar(value=True)
+        self._debounce = None
+
+        top = ttk.Frame(root, padding=(8, 6))
+        top.pack(fill="x")
+        ttk.Label(top, text="Format:").pack(side="left")
+        self.combo = ttk.Combobox(top, state="readonly", width=28)
+        self.combo.pack(side="left", padx=6)
+        self.combo.bind("<<ComboboxSelected>>", self.on_format_change)
+        ttk.Button(top, text="Open format...", command=self.open_format).pack(side="left", padx=6)
+        ttk.Checkbutton(top, text="reverse byte order (ILA MSB-first)",
+                        variable=self.reverse_var,
+                        command=self.schedule_parse).pack(side="left", padx=12)
+        ttk.Button(top, text="Load file...", command=self.load_file).pack(side="right")
+        ttk.Button(top, text="Clear", command=self.clear_all).pack(side="right", padx=6)
+
+        self.status = ttk.Label(root, anchor="w", padding=(8, 3), relief="sunken")
+        self.status.pack(fill="x", side="bottom")
+
+        pane = ttk.PanedWindow(root, orient="vertical")
+        pane.pack(fill="both", expand=True, padx=8)
+
+        inframe = ttk.LabelFrame(pane, text="Hex input (whitespace, 0x, commas ignored)")
+        pane.add(inframe, weight=1)
+        self.input = tk.Text(inframe, height=8, font=("TkFixedFont",), wrap="none", undo=True)
+        inscroll = ttk.Scrollbar(inframe, orient="vertical", command=self.input.yview)
+        self.input.configure(yscrollcommand=inscroll.set)
+        inscroll.pack(side="right", fill="y")
+        self.input.pack(fill="both", expand=True, padx=4, pady=4)
+        self.input.bind("<<Modified>>", self.on_modified)
+
+        outframe = ttk.LabelFrame(pane, text="Decoded words")
+        pane.add(outframe, weight=3)
+        ttk.Style(root).configure("Treeview", font=("TkFixedFont",))
+        self.tree = ttk.Treeview(outframe, show="headings")
+        vsb = ttk.Scrollbar(outframe, orient="vertical", command=self.tree.yview)
+        hsb = ttk.Scrollbar(outframe, orient="horizontal", command=self.tree.xview)
+        self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+        outframe.rowconfigure(0, weight=1)
+        outframe.columnconfigure(0, weight=1)
+        self.tree.tag_configure("stripe", background=self.TAG_STRIPE)
+
+        for path in discover_formats():
+            try:
+                self.add_format(load_format(path))
+            except FormatError as e:
+                print("hextract: skipping %s: %s" % (path, e), file=sys.stderr)
+        names = list(self.formats)
+        if names:
+            self.combo.set(names[0])
+            self.on_format_change()
+        else:
+            self.build_columns()
+            self.set_status("no formats found in %s" % FORMATS_DIR)
+
+    def add_format(self, fmt):
+        self.formats[fmt.name] = fmt
+        self.combo.configure(values=list(self.formats))
+
+    def current(self):
+        name = self.combo.get()
+        return self.formats.get(name)
+
+    def on_format_change(self, _event=None):
+        fmt = self.current()
+        if fmt is None:
+            return
+        self.reverse_var.set(fmt.byte_order == "msb-first")
+        for i, rule in enumerate(fmt.rules):
+            kw = {}
+            if rule.bg:
+                kw["background"] = rule.bg
+            if rule.fg:
+                kw["foreground"] = rule.fg
+            self.tree.tag_configure("rule%d" % i, **kw)
+        self.build_columns()
+        self.parse()
+        self.set_status("format: %s - %s" % (fmt.name, fmt.description))
+
+    def open_format(self):
+        path = filedialog.askopenfilename(
+            title="Open format description",
+            filetypes=[("TOML formats", "*.toml"), ("all files", "*")])
+        if not path:
+            return
+        try:
+            fmt = load_format(path)
+        except FormatError as e:
+            self.set_status("format error: %s" % e)
+            return
+        self.add_format(fmt)
+        self.combo.set(fmt.name)
+        self.on_format_change()
+
+    def build_columns(self):
+        fmt = self.current()
+        cols = ["#"] + (fmt.columns() if fmt else [])
+        self.tree["columns"] = cols
+        for c in cols:
+            self.tree.heading(c, text=c)
+            self.tree.column(c, width=50 if c == "#" else 96,
+                             anchor="center" if c == "#" else "e", stretch=False)
+
+    def on_modified(self, _event=None):
+        if self.input.edit_modified():
+            self.input.edit_modified(False)
+            self.schedule_parse()
+
+    def schedule_parse(self):
+        if self._debounce is not None:
+            self.root.after_cancel(self._debounce)
+        self._debounce = self.root.after(150, self.parse)
+
+    def load_file(self):
+        path = filedialog.askopenfilename(
+            title="Load hex capture",
+            filetypes=[("text files", "*.txt *.csv *.log"), ("all files", "*")])
+        if not path:
+            return
+        with open(path, "r", errors="replace") as fh:
+            text = fh.read()
+        self.input.delete("1.0", "end")
+        self.input.insert("1.0", text)
+        self.parse()
+
+    def clear_all(self):
+        self.input.delete("1.0", "end")
+        self.parse()
+
+    def set_status(self, msg):
+        self.status.configure(text=msg)
+
+    def parse(self):
+        self.build_columns()
+        self.tree.delete(*self.tree.get_children())
+        fmt = self.current()
+        if fmt is None:
+            self.set_status("no format selected")
+            return
+
+        rows, rem, err = hex_to_words(self.input.get("1.0", "end"), fmt,
+                                      self.reverse_var.get())
+        if err:
+            self.set_status("error: %s" % err)
+            return
+
+        for idx, row in enumerate(rows):
+            vals = [idx]
+            for f in fmt.fields:
+                v = row[f.name]
+                if f.count == 1:
+                    vals.append(format_cell(f, v))
+                else:
+                    vals.extend(format_cell(f, x) for x in v)
+            tags = []
+            env = rule_env(fmt, row)
+            for i, rule in enumerate(fmt.rules):
+                if eval_rule(rule, env):
+                    tags.append("rule%d" % i)
+                    break
+            if idx % 2 == 1:
+                tags.append("stripe")
+            self.tree.insert("", "end", values=vals, tags=tags)
+
+        msg = "%d words x %d B (%s)" % (len(rows), fmt.word_bytes, fmt.name)
+        if rem:
+            msg += " + %d trailing bytes ignored" % rem
+        self.set_status(msg)
+
+
+def gui_main():
+    if not HAVE_TK:
+        sys.exit("hextract: tkinter is not available on this system")
+    root = tk.Tk()
+    root.geometry("1100x700")
+    App(root)
+    root.mainloop()
+
+
+# ---------------------------------------------------------------- entry
+
+def main(argv=None):
+    if tomllib is None:
+        sys.exit("hextract: TOML formats need Python >= 3.11 (tomllib); running %s"
+                 % sys.version.split()[0])
+
+    parser = argparse.ArgumentParser(
+        prog="hextract",
+        description="Decode hex word dumps using a TOML format description.")
+    parser.add_argument("-f", "--format", metavar="NAME_OR_PATH",
+                        help="format name (from formats/) or path to a .toml")
+    parser.add_argument("input", nargs="?",
+                        help="hex capture file (default: stdin)")
+    parser.add_argument("--list-formats", action="store_true",
+                        help="list bundled format files and exit")
+    parser.add_argument("--no-header", action="store_true",
+                        help="suppress the column header in CLI output")
+    args = parser.parse_args(argv)
+
+    if args.list_formats:
+        return cli_list_formats()
+
+    if args.format:
+        try:
+            fmt = resolve_format(args.format)
+        except FormatError as e:
+            print("hextract: %s" % e, file=sys.stderr)
+            return 2
+        try:
+            if args.input:
+                with open(args.input, "r", errors="replace") as fh:
+                    text = fh.read()
+            else:
+                text = sys.stdin.read()
+        except OSError as e:
+            print("hextract: %s" % e, file=sys.stderr)
+            return 1
+        return cli_decode(fmt, text, args.no_header)
+
+    if sys.stdin.isatty():
+        gui_main()
+        return 0
+    sys.exit("hextract: nothing to do - pass -f FORMAT for CLI mode")
+
+
+if __name__ == "__main__":
+    sys.exit(main())

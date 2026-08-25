@@ -1,0 +1,37 @@
+# BLM rawdata BRAM packet - must stay in sync with bram_rawdata_packet
+# in blmApp/src/blmPLRegDefs.h
+[format]
+name = "blm_rawdata_256"
+description = "bram_rawdata_packet (32 B)"
+word_bits = 256
+byte_order = "msb-first"
+
+[[field]]
+name = "wr_time_s"
+type = "u32"
+
+[[field]]
+name = "wr_time_ns"
+type = "u32"
+
+[[field]]
+name = "integral"
+type = "i16"
+count = 6
+
+[[field]]
+name = "count"
+type = "u16"
+count = 6
+
+[[rule]]
+when = "any(v < 0 for v in integral)"
+bg = "#f6caca"
+
+[[rule]]
+when = "any(v != 0 for v in count)"
+bg = "#d3ecd3"
+
+[[rule]]
+when = "all(v == 0 for v in integral) and all(v == 0 for v in count)"
+fg = "#9a9a9a"

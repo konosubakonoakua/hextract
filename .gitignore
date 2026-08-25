@@ -1,0 +1,13 @@
+# Agents
+/.workbuddy/
+/.vscode/
+/.qoder/
+/.claude/
+/.pi/
+/.codex/
+/.opencode/
+/.hermes/
+/.gemini/
+
+# python files
+/__pycache__/
