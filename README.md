@@ -18,8 +18,12 @@ tkinter/DISPLAY.
 
 `-f` takes a bundled format name (from `formats/`) or a path to any `.toml`.
 In the GUI paste hex (whitespace/`0x`/commas are ignored); the table updates
-as you type. "reverse byte order" defaults per format (`msb-first` reverses
-each word's bytes, which is what ILA's MSB-first display needs).
+as you type. Use `New tab` to open another independent data workspace: each
+tab keeps its own format, byte order, input, filters, and decoded table, so
+different captures can be compared side by side. `Open format...` adds a TOML
+format to the shared format list, and `Close tab` removes the current workspace.
+Byte order defaults per format (`msb-first` reverses each word's bytes, which
+is what ILA's MSB-first display needs).
 
 ## TOML schema
 

@@ -72,6 +72,25 @@ class Rule:
     fg: Optional[str] = None
 
 
+@dataclass
+class GuiTab:
+    """Widgets and state belonging to one independent GUI work area."""
+    frame: object
+    title: str
+    format_name: str = ""
+    input: object = None
+    tree: object = None
+    byte_order_var: object = None
+    search_var: object = None
+    anomalies_only_var: object = None
+    vim_mode_var: object = None
+    vim_insert: bool = True
+    vim_pending: str = ""
+    vim_register: object = None
+    debounce: object = None
+    anomaly_items: list = None
+
+
 class PacketFormat:
     def __init__(self, name, description, word_bits, byte_order, fields, rules):
         self.name = name
@@ -413,15 +432,9 @@ class App:
         root.title("hextract")
 
         self.formats = {}
-        self.byte_order_var = tk.StringVar(value="MSB-first")
-        self.search_var = tk.StringVar()
-        self.anomalies_only_var = tk.BooleanVar(value=False)
-        self.vim_mode_var = tk.BooleanVar(value=False)
-        self._debounce = None
-        self._anomaly_items = []
-        self._vim_insert = True
-        self._vim_pending = ""
-        self._vim_register = None
+        self.tabs = []
+        self.active_tab = None
+        self._switching_tab = False
 
         top = ttk.Frame(root, padding=(8, 6))
         top.pack(fill="x")
@@ -432,29 +445,31 @@ class App:
         ttk.Button(top, text="Open format...", command=self.open_format).pack(side="left", padx=6)
         ttk.Label(top, text="Byte order:").pack(side="left", padx=(12, 4))
         self.byte_order_combo = ttk.Combobox(
-            top, state="readonly", width=12,
-            textvariable=self.byte_order_var,
-            values=("MSB-first", "LSB-first"))
+            top, state="readonly", width=12, values=("MSB-first", "LSB-first"))
         self.byte_order_combo.pack(side="left")
         self.byte_order_combo.bind("<<ComboboxSelected>>",
                                    lambda _event: self.schedule_parse())
+        ttk.Button(top, text="New tab", command=self.new_tab).pack(side="left", padx=6)
+        ttk.Button(top, text="Close tab", command=self.close_tab).pack(side="left")
         ttk.Button(top, text="Load file...", command=self.load_file).pack(side="right")
         ttk.Button(top, text="Clear", command=self.clear_all).pack(side="right", padx=6)
-        ttk.Checkbutton(top, text="Vim mode", variable=self.vim_mode_var,
-                        command=self.toggle_vim_mode).pack(side="right", padx=6)
+        self.vim_check = ttk.Checkbutton(top, text="Vim mode",
+                                         command=self.toggle_vim_mode)
+        self.vim_check.pack(side="right", padx=6)
 
         filters = ttk.Frame(root, padding=(8, 0, 8, 4))
         filters.pack(fill="x")
         ttk.Label(filters, text="Search:").pack(side="left")
-        search = ttk.Entry(filters, textvariable=self.search_var, width=30)
-        self.search_entry = search
-        search.pack(side="left", padx=6)
-        search.bind("<KeyRelease>", lambda _event: self.schedule_parse())
-        search.bind("<Return>", lambda _event: self.parse())
+        self.search_label = ttk.Label(filters, text="Search:")
+        self.search_label.pack(side="left")
+        self.search_entry = ttk.Entry(filters, width=30)
+        self.search_entry.pack(side="left", padx=6)
+        self.search_entry.bind("<KeyRelease>", lambda _event: self.schedule_parse())
+        self.search_entry.bind("<Return>", lambda _event: self.parse())
         ttk.Button(filters, text="Clear search", command=self.clear_search).pack(side="left")
-        ttk.Checkbutton(filters, text="Anomalies only",
-                        variable=self.anomalies_only_var,
-                        command=self.parse).pack(side="left", padx=12)
+        self.anomalies_check = ttk.Checkbutton(filters, text="Anomalies only",
+                                               command=self.parse)
+        self.anomalies_check.pack(side="left", padx=12)
         ttk.Button(filters, text="Next anomaly", command=self.next_anomaly).pack(side="right")
         self.vim_status = ttk.Label(filters, text="INSERT")
         self.vim_status.pack(side="right", padx=10)
@@ -465,35 +480,9 @@ class App:
         self.legend = ttk.Frame(root, padding=(8, 0, 8, 4))
         self.legend.pack(fill="x")
 
-        pane = ttk.PanedWindow(root, orient="vertical")
-        pane.pack(fill="both", expand=True, padx=8)
-
-        inframe = ttk.LabelFrame(pane, text="Hex input (whitespace, 0x, commas ignored)")
-        pane.add(inframe, weight=1)
-        self.input = tk.Text(inframe, height=8, font=("TkFixedFont",), wrap="none", undo=True)
-        inscroll = ttk.Scrollbar(inframe, orient="vertical", command=self.input.yview)
-        inhscroll = ttk.Scrollbar(inframe, orient="horizontal", command=self.input.xview)
-        self.input.configure(yscrollcommand=inscroll.set)
-        self.input.configure(xscrollcommand=inhscroll.set)
-        inscroll.pack(side="right", fill="y")
-        inhscroll.pack(side="bottom", fill="x")
-        self.input.pack(fill="both", expand=True, padx=4, pady=4)
-        self.input.bind("<<Modified>>", self.on_modified)
-        self.install_input_bindings()
-
-        outframe = ttk.LabelFrame(pane, text="Decoded words")
-        pane.add(outframe, weight=3)
-        ttk.Style(root).configure("Treeview", font=("TkFixedFont",))
-        self.tree = ttk.Treeview(outframe, show="headings")
-        vsb = ttk.Scrollbar(outframe, orient="vertical", command=self.tree.yview)
-        hsb = ttk.Scrollbar(outframe, orient="horizontal", command=self.tree.xview)
-        self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
-        self.tree.grid(row=0, column=0, sticky="nsew")
-        vsb.grid(row=0, column=1, sticky="ns")
-        hsb.grid(row=1, column=0, sticky="ew")
-        outframe.rowconfigure(0, weight=1)
-        outframe.columnconfigure(0, weight=1)
-        self.tree.tag_configure("stripe", background=self.TAG_STRIPE)
+        self.notebook = ttk.Notebook(root)
+        self.notebook.pack(fill="both", expand=True, padx=8)
+        self.notebook.bind("<<NotebookTabChanged>>", self.on_tab_changed)
 
         for path in discover_formats():
             try:
@@ -503,10 +492,106 @@ class App:
         names = list(self.formats)
         if names:
             self.combo.set(names[0])
-            self.on_format_change()
+            self.new_tab(names[0])
         else:
-            self.build_columns()
             self.set_status("no formats found in %s" % FORMATS_DIR)
+
+    def new_tab(self, format_name=None):
+        if not self.formats:
+            self.set_status("no formats found in %s" % FORMATS_DIR)
+            return
+        name = format_name or self.combo.get() or next(iter(self.formats))
+        frame = ttk.Frame(self.notebook)
+        tab = GuiTab(frame, "Data %d" % (len(self.tabs) + 1), name,
+                     byte_order_var=tk.StringVar(value="MSB-first"),
+                     search_var=tk.StringVar(),
+                     anomalies_only_var=tk.BooleanVar(value=False),
+                     vim_mode_var=tk.BooleanVar(value=False), anomaly_items=[])
+        pane = ttk.PanedWindow(frame, orient="vertical")
+        pane.pack(fill="both", expand=True)
+        inframe = ttk.LabelFrame(pane, text="Hex input (whitespace, 0x, commas ignored)")
+        pane.add(inframe, weight=1)
+        tab.input = tk.Text(inframe, height=8, font=("TkFixedFont",), wrap="none", undo=True)
+        inscroll = ttk.Scrollbar(inframe, orient="vertical", command=tab.input.yview)
+        inhscroll = ttk.Scrollbar(inframe, orient="horizontal", command=tab.input.xview)
+        tab.input.configure(yscrollcommand=inscroll.set, xscrollcommand=inhscroll.set)
+        inscroll.pack(side="right", fill="y")
+        inhscroll.pack(side="bottom", fill="x")
+        tab.input.pack(fill="both", expand=True, padx=4, pady=4)
+        tab.input.bind("<<Modified>>", self.on_modified)
+        self.install_input_bindings(tab)
+        outframe = ttk.LabelFrame(pane, text="Decoded words")
+        pane.add(outframe, weight=3)
+        ttk.Style(self.root).configure("Treeview", font=("TkFixedFont",))
+        tab.tree = ttk.Treeview(outframe, show="headings")
+        vsb = ttk.Scrollbar(outframe, orient="vertical", command=tab.tree.yview)
+        hsb = ttk.Scrollbar(outframe, orient="horizontal", command=tab.tree.xview)
+        tab.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        tab.tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+        outframe.rowconfigure(0, weight=1)
+        outframe.columnconfigure(0, weight=1)
+        tab.tree.tag_configure("stripe", background=self.TAG_STRIPE)
+        self.tabs.append(tab)
+        self.notebook.add(frame, text=tab.title)
+        self.notebook.select(frame)
+        self.activate_tab(tab)
+        self.on_format_change()
+
+    def activate_tab(self, tab):
+        self.active_tab = tab
+        self.input = tab.input
+        self.tree = tab.tree
+        self.byte_order_var = tab.byte_order_var
+        self.search_var = tab.search_var
+        self.anomalies_only_var = tab.anomalies_only_var
+        self.vim_mode_var = tab.vim_mode_var
+        self._debounce = tab.debounce
+        self._anomaly_items = tab.anomaly_items
+        self._vim_insert = tab.vim_insert
+        self._vim_pending = tab.vim_pending
+        self._vim_register = tab.vim_register
+        self.search_entry.configure(textvariable=self.search_var)
+        self.anomalies_check.configure(variable=self.anomalies_only_var)
+        self.vim_check.configure(variable=self.vim_mode_var)
+        self.update_vim_status()
+
+    def save_tab_state(self):
+        if self.active_tab is None:
+            return
+        tab = self.active_tab
+        tab.debounce = self._debounce
+        tab.anomaly_items = self._anomaly_items
+        tab.vim_insert = self._vim_insert
+        tab.vim_pending = self._vim_pending
+        tab.vim_register = self._vim_register
+
+    def on_tab_changed(self, _event=None):
+        if self._switching_tab:
+            return
+        selected = self.notebook.select()
+        for tab in self.tabs:
+            if str(tab.frame) == selected:
+                self.save_tab_state()
+                self.activate_tab(tab)
+                self.combo.set(tab.format_name)
+                self.on_format_change()
+                break
+
+    def close_tab(self):
+        if len(self.tabs) <= 1:
+            self.set_status("at least one tab must remain open")
+            return
+        selected = self.notebook.select()
+        tab = next((t for t in self.tabs if str(t.frame) == selected), None)
+        if tab is None:
+            return
+        if tab.debounce is not None:
+            self.root.after_cancel(tab.debounce)
+        self.tabs.remove(tab)
+        self.notebook.forget(tab.frame)
+        self.notebook.select(self.tabs[-1].frame)
 
     def add_format(self, fmt):
         self.formats[fmt.name] = fmt
@@ -518,8 +603,12 @@ class App:
 
     def on_format_change(self, _event=None):
         fmt = self.current()
-        if fmt is None:
+        if fmt is None or self.active_tab is None:
             return
+        self.active_tab.format_name = fmt.name
+        self.notebook.tab(self.active_tab.frame,
+                          text="%s: %s" % (self.active_tab.title, fmt.name))
+        self.byte_order_combo.configure(textvariable=self.byte_order_var)
         self.byte_order_var.set("MSB-first" if fmt.byte_order == "msb-first"
                                 else "LSB-first")
         for i, rule in enumerate(fmt.rules):
@@ -547,7 +636,10 @@ class App:
             return
         self.add_format(fmt)
         self.combo.set(fmt.name)
-        self.on_format_change()
+        if self.active_tab is None:
+            self.new_tab(fmt.name)
+        else:
+            self.on_format_change()
 
     def build_columns(self):
         fmt = self.current()
@@ -563,7 +655,7 @@ class App:
             self.input.edit_modified(False)
             self.schedule_parse()
 
-    def install_input_bindings(self):
+    def install_input_bindings(self, tab=None):
         bindings = {
             "<Control-a>": self.select_all_input,
             "<Control-c>": self.copy_input,
@@ -575,21 +667,23 @@ class App:
             "<Control-f>": self.focus_search,
             "<Control-u>": self.delete_to_line_start,
         }
+        input_widget = tab.input if tab is not None else self.input
         for sequence, callback in bindings.items():
-            self.input.bind(sequence, callback)
+            input_widget.bind(sequence, callback)
 
-        self.input_menu = tk.Menu(self.input, tearoff=False)
-        self.input_menu.add_command(label="Select all", command=self.select_all_input)
-        self.input_menu.add_separator()
-        self.input_menu.add_command(label="Undo", command=self.undo_input)
-        self.input_menu.add_command(label="Redo", command=self.redo_input)
-        self.input_menu.add_separator()
-        self.input_menu.add_command(label="Cut", command=self.cut_input)
-        self.input_menu.add_command(label="Copy", command=self.copy_input)
-        self.input_menu.add_command(label="Paste", command=self.paste_input)
-        self.input.bind("<Button-3>", self.show_input_menu)
-        self.input.bind("<Escape>", self.vim_escape)
-        self.input.bind("<Key>", self.handle_vim_key)
+        menu = tk.Menu(input_widget, tearoff=False)
+        menu.add_command(label="Select all", command=self.select_all_input)
+        menu.add_separator()
+        menu.add_command(label="Undo", command=self.undo_input)
+        menu.add_command(label="Redo", command=self.redo_input)
+        menu.add_separator()
+        menu.add_command(label="Cut", command=self.cut_input)
+        menu.add_command(label="Copy", command=self.copy_input)
+        menu.add_command(label="Paste", command=self.paste_input)
+        input_widget.input_menu = menu
+        input_widget.bind("<Button-3>", self.show_input_menu)
+        input_widget.bind("<Escape>", self.vim_escape)
+        input_widget.bind("<Key>", self.handle_vim_key)
 
     def toggle_vim_mode(self):
         self._vim_insert = True
@@ -724,7 +818,7 @@ class App:
 
     def show_input_menu(self, event):
         self.input.focus_set()
-        self.input_menu.tk_popup(event.x_root, event.y_root)
+        self.input.input_menu.tk_popup(event.x_root, event.y_root)
         return "break"
 
     def schedule_parse(self):
@@ -843,7 +937,7 @@ def gui_main():
     if not HAVE_TK:
         sys.exit("hextract: tkinter is not available on this system")
     root = tk.Tk()
-    root.geometry("1100x700")
+    root.geometry("1300x700")
     App(root)
     root.mainloop()
 
