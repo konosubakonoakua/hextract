@@ -55,6 +55,11 @@ is limited to 10,000 rows to keep the interface responsive; the status bar
 reports truncation and rule evaluation errors. Duplicate rule expressions are
 reported as warnings because the first matching rule wins.
 
+The Hex input supports standard editing shortcuts: Ctrl+A selects all, Ctrl+C
+copies, Ctrl+X cuts, Ctrl+V pastes, Ctrl+Z undoes, Ctrl+Y (or Ctrl+Shift+Z)
+redoes, and Ctrl+F focuses the search box. Right-clicking the input opens the
+same editing actions in a context menu.
+
 ## Bundled formats
 
 | file | packet | layout |

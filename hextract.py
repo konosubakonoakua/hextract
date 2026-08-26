@@ -441,6 +441,7 @@ class App:
         filters.pack(fill="x")
         ttk.Label(filters, text="Search:").pack(side="left")
         search = ttk.Entry(filters, textvariable=self.search_var, width=30)
+        self.search_entry = search
         search.pack(side="left", padx=6)
         search.bind("<KeyRelease>", lambda _event: self.schedule_parse())
         search.bind("<Return>", lambda _event: self.parse())
@@ -463,10 +464,14 @@ class App:
         pane.add(inframe, weight=1)
         self.input = tk.Text(inframe, height=8, font=("TkFixedFont",), wrap="none", undo=True)
         inscroll = ttk.Scrollbar(inframe, orient="vertical", command=self.input.yview)
+        inhscroll = ttk.Scrollbar(inframe, orient="horizontal", command=self.input.xview)
         self.input.configure(yscrollcommand=inscroll.set)
+        self.input.configure(xscrollcommand=inhscroll.set)
         inscroll.pack(side="right", fill="y")
+        inhscroll.pack(side="bottom", fill="x")
         self.input.pack(fill="both", expand=True, padx=4, pady=4)
         self.input.bind("<<Modified>>", self.on_modified)
+        self.install_input_bindings()
 
         outframe = ttk.LabelFrame(pane, text="Decoded words")
         pane.add(outframe, weight=3)
@@ -549,6 +554,73 @@ class App:
         if self.input.edit_modified():
             self.input.edit_modified(False)
             self.schedule_parse()
+
+    def install_input_bindings(self):
+        bindings = {
+            "<Control-a>": self.select_all_input,
+            "<Control-c>": self.copy_input,
+            "<Control-x>": self.cut_input,
+            "<Control-v>": self.paste_input,
+            "<Control-z>": self.undo_input,
+            "<Control-y>": self.redo_input,
+            "<Control-Shift-Z>": self.redo_input,
+            "<Control-f>": self.focus_search,
+        }
+        for sequence, callback in bindings.items():
+            self.input.bind(sequence, callback)
+
+        self.input_menu = tk.Menu(self.input, tearoff=False)
+        self.input_menu.add_command(label="Select all", command=self.select_all_input)
+        self.input_menu.add_separator()
+        self.input_menu.add_command(label="Undo", command=self.undo_input)
+        self.input_menu.add_command(label="Redo", command=self.redo_input)
+        self.input_menu.add_separator()
+        self.input_menu.add_command(label="Cut", command=self.cut_input)
+        self.input_menu.add_command(label="Copy", command=self.copy_input)
+        self.input_menu.add_command(label="Paste", command=self.paste_input)
+        self.input.bind("<Button-3>", self.show_input_menu)
+
+    def select_all_input(self, _event=None):
+        self.input.focus_set()
+        self.input.tag_add(tk.SEL, "1.0", "end-1c")
+        self.input.mark_set(tk.INSERT, "end-1c")
+        return "break"
+
+    def undo_input(self, _event=None):
+        try:
+            self.input.edit_undo()
+        except tk.TclError:
+            pass
+        return "break"
+
+    def copy_input(self, _event=None):
+        self.input.event_generate("<<Copy>>")
+        return "break"
+
+    def cut_input(self, _event=None):
+        self.input.event_generate("<<Cut>>")
+        return "break"
+
+    def paste_input(self, _event=None):
+        self.input.event_generate("<<Paste>>")
+        return "break"
+
+    def redo_input(self, _event=None):
+        try:
+            self.input.edit_redo()
+        except tk.TclError:
+            pass
+        return "break"
+
+    def focus_search(self, _event=None):
+        self.search_entry.focus_set()
+        self.search_entry.selection_range(0, "end")
+        return "break"
+
+    def show_input_menu(self, event):
+        self.input.focus_set()
+        self.input_menu.tk_popup(event.x_root, event.y_root)
+        return "break"
 
     def schedule_parse(self):
         if self._debounce is not None:
