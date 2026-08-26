@@ -28,7 +28,7 @@ each word's bytes, which is what ILA's MSB-first display needs).
 name = "my_packet"          # required, unique
 description = "..."
 word_bits = 256             # required, multiple of 8
-byte_order = "msb-first"    # or "raw" (default msb-first)
+byte_order = "msb-first"    # or "lsb-first" (default msb-first)
 
 [[field]]                   # order = packet layout, LSB end first
 name = "integral"

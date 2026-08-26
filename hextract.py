@@ -187,8 +187,8 @@ def load_format(path):
     if not isinstance(word_bits, int) or word_bits <= 0 or word_bits % 8:
         raise FormatError("format.word_bits must be a positive multiple of 8")
     byte_order = meta.get("byte_order", "msb-first")
-    if byte_order not in ("msb-first", "raw"):
-        raise FormatError("format.byte_order must be 'msb-first' or 'raw'")
+    if byte_order not in ("msb-first", "lsb-first"):
+        raise FormatError("format.byte_order must be 'msb-first' or 'lsb-first'")
     description = meta.get("description", "")
 
     raw_fields = data.get("field")
@@ -413,7 +413,7 @@ class App:
         root.title("hextract")
 
         self.formats = {}
-        self.reverse_var = tk.BooleanVar(value=True)
+        self.byte_order_var = tk.StringVar(value="MSB-first")
         self.search_var = tk.StringVar()
         self.anomalies_only_var = tk.BooleanVar(value=False)
         self._debounce = None
@@ -426,9 +426,14 @@ class App:
         self.combo.pack(side="left", padx=6)
         self.combo.bind("<<ComboboxSelected>>", self.on_format_change)
         ttk.Button(top, text="Open format...", command=self.open_format).pack(side="left", padx=6)
-        ttk.Checkbutton(top, text="reverse byte order (ILA MSB-first)",
-                        variable=self.reverse_var,
-                        command=self.schedule_parse).pack(side="left", padx=12)
+        ttk.Label(top, text="Byte order:").pack(side="left", padx=(12, 4))
+        self.byte_order_combo = ttk.Combobox(
+            top, state="readonly", width=12,
+            textvariable=self.byte_order_var,
+            values=("MSB-first", "LSB-first"))
+        self.byte_order_combo.pack(side="left")
+        self.byte_order_combo.bind("<<ComboboxSelected>>",
+                                   lambda _event: self.schedule_parse())
         ttk.Button(top, text="Load file...", command=self.load_file).pack(side="right")
         ttk.Button(top, text="Clear", command=self.clear_all).pack(side="right", padx=6)
 
@@ -502,7 +507,8 @@ class App:
         fmt = self.current()
         if fmt is None:
             return
-        self.reverse_var.set(fmt.byte_order == "msb-first")
+        self.byte_order_var.set("MSB-first" if fmt.byte_order == "msb-first"
+                                else "LSB-first")
         for i, rule in enumerate(fmt.rules):
             kw = {}
             if rule.bg:
@@ -608,8 +614,9 @@ class App:
             self.set_status("no format selected")
             return
 
-        rows, rem, err = hex_to_words(self.input.get("1.0", "end"), fmt,
-                                      self.reverse_var.get())
+        rows, rem, err = hex_to_words(
+            self.input.get("1.0", "end"), fmt,
+            self.byte_order_var.get() == "MSB-first")
         if err:
             self.set_status("error: %s" % err)
             return

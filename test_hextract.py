@@ -64,7 +64,7 @@ class TestBundledFormats(unittest.TestCase):
         fmt = hx.load_format(FMT256)
         self.assertEqual(fmt.word_bytes, 32)
         blob = struct.pack('<II6h6H', 1, 2, 1, 2, 3, 4, 5, 6, 9, 0, 0, 0, 0, 0)
-        rows, rem, err = hx.hex_to_words(msbfirst(blob, 32).hex(), fmt)
+        rows, rem, err = hx.hex_to_words(blob.hex(), fmt)
         self.assertIsNone(err)
         self.assertEqual(rem, 0)
         self.assertEqual(rows[0]["wr_time_ns"], 2)
@@ -115,7 +115,7 @@ BF_TOML = """
 [format]
 name = "bf"
 word_bits = 32
-byte_order = "raw"
+byte_order = "lsb-first"
 
 [[field]]
 name = "flag7"
@@ -259,6 +259,11 @@ class TestFormatValidation(unittest.TestCase):
         rows, _, err = hx.hex_to_words("01020304", fmt, reverse=False)
         self.assertIsNone(err)
         self.assertEqual(rows[0]["a"], 1)
+
+    def test_raw_byte_order_is_rejected(self):
+        with self.assertRaises(hx.FormatError):
+            self.load('[format]\nname = "x"\nword_bits = 8\n'
+                      'byte_order = "raw"\n[[field]]\nname = "a"\ntype = "u8"\n')
 
 
 @unittest.skipUnless(hx.HAVE_TK and os.environ.get("DISPLAY"), "needs tkinter + DISPLAY")

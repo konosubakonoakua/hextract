@@ -4,7 +4,7 @@
 name = "blm_rawdata_256"
 description = "bram_rawdata_packet (32 B)"
 word_bits = 256
-byte_order = "msb-first"
+byte_order = "lsb-first"
 
 [[field]]
 name = "wr_time_s"
