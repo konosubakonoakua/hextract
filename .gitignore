@@ -11,3 +11,6 @@
 
 # python files
 /__pycache__/
+
+# other files
+/tmp/
