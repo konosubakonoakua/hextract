@@ -39,6 +39,7 @@ radix = "hex"               # optional display radix (hex/dec)
 scale = 100.0               # optional display multiplier
 
 [[rule]]                    # row coloring, first match wins (GUI)
+name = "negative integral" # optional legend/status name
 when = "any(v < 0 for v in integral)"
 bg = "#f6caca"              # bg and/or fg
 ```
@@ -46,6 +47,13 @@ bg = "#f6caca"              # bg and/or fg
 Fields may use fewer bits than `word_bits`; the remainder is padding.
 `when` is a restricted Python expression over field names (arrays stay
 tuples); allowed calls: `any all min max abs len`.
+
+The GUI shows a rule legend and a status column, supports text search, an
+anomalies-only filter, and a next-anomaly action. Rows with a matching rule
+are never given the zebra stripe, so rule colors remain visible. The display
+is limited to 10,000 rows to keep the interface responsive; the status bar
+reports truncation and rule evaluation errors. Duplicate rule expressions are
+reported as warnings because the first matching rule wins.
 
 ## Bundled formats
 

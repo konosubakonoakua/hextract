@@ -67,6 +67,7 @@ class Field:
 class Rule:
     when_src: str
     code: object
+    name: str = ""
     bg: Optional[str] = None
     fg: Optional[str] = None
 
@@ -80,6 +81,15 @@ class PacketFormat:
         self.fields = fields
         self.rules = rules
         self._struct = None
+        self.rule_warnings = []
+        seen_rules = {}
+        for i, rule in enumerate(rules):
+            if rule.when_src in seen_rules:
+                self.rule_warnings.append(
+                    "rule %d is identical to rule %d; first match wins" %
+                    (i + 1, seen_rules[rule.when_src] + 1))
+            else:
+                seen_rules[rule.when_src] = i
 
     @property
     def word_bytes(self):
@@ -217,12 +227,15 @@ def load_format(path):
         if not isinstance(when, str) or not when:
             raise FormatError("rule %d: when missing" % i)
         bg, fg = rd.get("bg"), rd.get("fg")
+        rname = rd.get("name", "Rule %d" % (i + 1))
+        if not isinstance(rname, str) or not rname:
+            raise FormatError("rule %d: name must be a non-empty string" % i)
         if bg is None and fg is None:
             raise FormatError("rule %d: needs bg and/or fg color" % i)
         for cname, cval in (("bg", bg), ("fg", fg)):
             if cval is not None and (not isinstance(cval, str) or not cval):
                 raise FormatError("rule %d: %s must be a color string" % (i, cname))
-        rules.append(Rule(when, compile_rule(when, seen), bg, fg))
+        rules.append(Rule(when, compile_rule(when, seen), rname, bg, fg))
 
     return PacketFormat(name, description, word_bits, byte_order, fields, rules)
 
@@ -290,10 +303,15 @@ def hex_to_words(text, fmt, reverse=None):
 
 
 def eval_rule(rule, env):
+    matched, _ = eval_rule_result(rule, env)
+    return matched
+
+
+def eval_rule_result(rule, env):
     try:
-        return bool(eval(rule.code, {"__builtins__": {}}, env))
-    except Exception:
-        return False
+        return bool(eval(rule.code, {"__builtins__": {}}, env)), None
+    except Exception as e:
+        return False, str(e)
 
 
 def rule_env(fmt, row):
@@ -303,14 +321,28 @@ def rule_env(fmt, row):
 
 
 def row_tags(fmt, row, idx):
-    # Add the stripe first so a matching rule, added later, takes precedence.
-    tags = ["stripe"] if idx % 2 == 1 else []
-    env = rule_env(fmt, row)
-    for i, rule in enumerate(fmt.rules):
-        if eval_rule(rule, env):
-            tags.append("rule%d" % i)
-            break
+    matched, _ = evaluate_row(fmt, row)
+    # Treeview tag precedence varies by Tk version; never mix stripe and rule.
+    tags = ["stripe"] if idx % 2 == 1 and matched is None else []
+    if matched is not None:
+        tags.append("rule%d" % matched)
     return tags
+
+
+def evaluate_row(fmt, row):
+    env = rule_env(fmt, row)
+    errors = []
+    for i, rule in enumerate(fmt.rules):
+        matched, error = eval_rule_result(rule, env)
+        if error:
+            errors.append((i, error))
+        if matched:
+            return i, errors
+    return None, errors
+
+
+def rule_display_name(rule, index):
+    return rule.name or "Rule %d" % (index + 1)
 
 
 def format_cell(field, value):
@@ -374,6 +406,7 @@ def cli_list_formats():
 
 class App:
     TAG_STRIPE = "#f2f4f8"
+    MAX_GUI_ROWS = 10000
 
     def __init__(self, root):
         self.root = root
@@ -381,7 +414,10 @@ class App:
 
         self.formats = {}
         self.reverse_var = tk.BooleanVar(value=True)
+        self.search_var = tk.StringVar()
+        self.anomalies_only_var = tk.BooleanVar(value=False)
         self._debounce = None
+        self._anomaly_items = []
 
         top = ttk.Frame(root, padding=(8, 6))
         top.pack(fill="x")
@@ -396,8 +432,24 @@ class App:
         ttk.Button(top, text="Load file...", command=self.load_file).pack(side="right")
         ttk.Button(top, text="Clear", command=self.clear_all).pack(side="right", padx=6)
 
+        filters = ttk.Frame(root, padding=(8, 0, 8, 4))
+        filters.pack(fill="x")
+        ttk.Label(filters, text="Search:").pack(side="left")
+        search = ttk.Entry(filters, textvariable=self.search_var, width=30)
+        search.pack(side="left", padx=6)
+        search.bind("<KeyRelease>", lambda _event: self.schedule_parse())
+        search.bind("<Return>", lambda _event: self.parse())
+        ttk.Button(filters, text="Clear search", command=self.clear_search).pack(side="left")
+        ttk.Checkbutton(filters, text="Anomalies only",
+                        variable=self.anomalies_only_var,
+                        command=self.parse).pack(side="left", padx=12)
+        ttk.Button(filters, text="Next anomaly", command=self.next_anomaly).pack(side="right")
+
         self.status = ttk.Label(root, anchor="w", padding=(8, 3), relief="sunken")
         self.status.pack(fill="x", side="bottom")
+
+        self.legend = ttk.Frame(root, padding=(8, 0, 8, 4))
+        self.legend.pack(fill="x")
 
         pane = ttk.PanedWindow(root, orient="vertical")
         pane.pack(fill="both", expand=True, padx=8)
@@ -458,6 +510,7 @@ class App:
             if rule.fg:
                 kw["foreground"] = rule.fg
             self.tree.tag_configure("rule%d" % i, **kw)
+        self.update_legend(fmt)
         self.build_columns()
         self.parse()
         self.set_status("format: %s - %s" % (fmt.name, fmt.description))
@@ -479,11 +532,11 @@ class App:
 
     def build_columns(self):
         fmt = self.current()
-        cols = ["#"] + (fmt.columns() if fmt else [])
+        cols = ["#", "status"] + (fmt.columns() if fmt else [])
         self.tree["columns"] = cols
         for c in cols:
             self.tree.heading(c, text=c)
-            self.tree.column(c, width=50 if c == "#" else 96,
+            self.tree.column(c, width=50 if c == "#" else (120 if c == "status" else 96),
                              anchor="center" if c == "#" else "e", stretch=False)
 
     def on_modified(self, _event=None):
@@ -512,6 +565,38 @@ class App:
         self.input.delete("1.0", "end")
         self.parse()
 
+    def clear_search(self):
+        self.search_var.set("")
+        self.parse()
+
+    def next_anomaly(self):
+        if not self._anomaly_items:
+            self.set_status("no visible anomalies")
+            return
+        selected = self.tree.selection()
+        current = selected[0] if selected else None
+        try:
+            pos = self._anomaly_items.index(current)
+            item = self._anomaly_items[(pos + 1) % len(self._anomaly_items)]
+        except ValueError:
+            item = self._anomaly_items[0]
+        self.tree.selection_set(item)
+        self.tree.focus(item)
+        self.tree.see(item)
+
+    def update_legend(self, fmt):
+        for child in self.legend.winfo_children():
+            child.destroy()
+        if not fmt.rules:
+            return
+        ttk.Label(self.legend, text="Rules:").pack(side="left", padx=(0, 6))
+        for i, rule in enumerate(fmt.rules):
+            label = tk.Label(self.legend, text=" %s " % rule_display_name(rule, i),
+                             background=rule.bg or "white",
+                             foreground=rule.fg or "black",
+                             relief="solid", borderwidth=1, padx=3, pady=1)
+            label.pack(side="left", padx=2)
+
     def set_status(self, msg):
         self.status.configure(text=msg)
 
@@ -529,18 +614,42 @@ class App:
             self.set_status("error: %s" % err)
             return
 
+        self._anomaly_items = []
+        query = self.search_var.get().strip().casefold()
+        shown = 0
+        error_rows = 0
         for idx, row in enumerate(rows):
-            vals = [idx]
+            matched, errors = evaluate_row(fmt, row)
+            if errors:
+                error_rows += 1
+            anomaly = matched is not None and fmt.rules[matched].bg is not None
+            status = ("! " + rule_display_name(fmt.rules[matched], matched)
+                      if anomaly else "-" if matched is not None else "")
+            vals = [idx, status]
             for f in fmt.fields:
                 v = row[f.name]
                 if f.count == 1:
                     vals.append(format_cell(f, v))
                 else:
                     vals.extend(format_cell(f, x) for x in v)
-            tags = row_tags(fmt, row, idx)
-            self.tree.insert("", "end", values=vals, tags=tags)
+            haystack = " ".join(str(value) for value in vals).casefold()
+            if (self.anomalies_only_var.get() and not anomaly) or (query and query not in haystack):
+                continue
+            if shown >= self.MAX_GUI_ROWS:
+                continue
+            item = self.tree.insert("", "end", values=vals, tags=row_tags(fmt, row, idx))
+            shown += 1
+            if anomaly:
+                self._anomaly_items.append(item)
 
-        msg = "%d words x %d B (%s)" % (len(rows), fmt.word_bytes, fmt.name)
+        msg = "%d words x %d B (%s), showing %d" % (
+            len(rows), fmt.word_bytes, fmt.name, shown)
+        if len(rows) > shown and shown == self.MAX_GUI_ROWS:
+            msg += " (display limit %d)" % self.MAX_GUI_ROWS
+        if error_rows:
+            msg += ", %d rule evaluation errors" % error_rows
+        if fmt.rule_warnings:
+            msg += "; warning: " + "; ".join(fmt.rule_warnings)
         if rem:
             msg += " + %d trailing bytes ignored" % rem
         self.set_status(msg)

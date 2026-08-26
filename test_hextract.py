@@ -180,7 +180,21 @@ class TestRules(unittest.TestCase):
         row = {"integral": (-1, 0, 0, 0, 0, 0),
                "count": (0, 0, 0, 0, 0, 0)}
         self.assertEqual(hx.row_tags(self.fmt, row, 0), ["rule0"])
-        self.assertEqual(hx.row_tags(self.fmt, row, 1), ["stripe", "rule0"])
+        self.assertEqual(hx.row_tags(self.fmt, row, 1), ["rule0"])
+
+    def test_rule_name_and_duplicate_warning(self):
+        self.assertEqual(self.fmt.rules[0].name, "Rule 1")
+        duplicate = tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False)
+        try:
+            duplicate.write('[format]\nname = "x"\nword_bits = 8\n'
+                            '[[field]]\nname = "a"\ntype = "u8"\n'
+                            '[[rule]]\nwhen = "a > 0"\nbg = "#ff0000"\n'
+                            '[[rule]]\nwhen = "a > 0"\nbg = "#00ff00"\n')
+            duplicate.close()
+            fmt = hx.load_format(duplicate.name)
+            self.assertEqual(len(fmt.rule_warnings), 1)
+        finally:
+            os.unlink(duplicate.name)
 
     def _reject(self, when):
         with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as fh:
@@ -260,9 +274,9 @@ class TestGui(unittest.TestCase):
             app.parse()
             kids = app.tree.get_children()
             self.assertEqual(len(kids), 3)
-            self.assertEqual(len(app.tree["columns"]), 17)
+            self.assertEqual(len(app.tree["columns"]), 18)
             self.assertEqual(app.tree.item(kids[0], "tags")[0], "rule1")  # has count
-            self.assertEqual(app.tree.item(kids[1], "tags"), ("stripe", "rule0"))  # negative
+            self.assertEqual(app.tree.item(kids[1], "tags"), ("rule0",))  # negative
             self.assertEqual(app.tree.item(kids[2], "tags")[0], "rule2")  # all zero
         finally:
             root.destroy()
