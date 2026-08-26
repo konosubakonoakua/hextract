@@ -62,7 +62,9 @@ same editing actions in a context menu.
 
 Optional Vim mode can be enabled in the GUI. It starts in INSERT mode; press
 Esc for NORMAL mode. The initial NORMAL commands are `i`, `a`, `o`, `h`, `j`,
-`k`, `l`, `x`, `dd`, `0`, and `$`.
+`k`, `l`, `x`, `dd`, `yy`, `p`, `0`, and `$`. `dd` and `yy` use an internal
+line register, and `p` pastes that line below the current line. Ctrl+U deletes
+from the cursor to the beginning of the current line in either mode.
 
 ## Bundled formats
 

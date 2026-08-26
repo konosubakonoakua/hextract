@@ -421,6 +421,7 @@ class App:
         self._anomaly_items = []
         self._vim_insert = True
         self._vim_pending = ""
+        self._vim_register = None
 
         top = ttk.Frame(root, padding=(8, 6))
         top.pack(fill="x")
@@ -572,6 +573,7 @@ class App:
             "<Control-y>": self.redo_input,
             "<Control-Shift-Z>": self.redo_input,
             "<Control-f>": self.focus_search,
+            "<Control-u>": self.delete_to_line_start,
         }
         for sequence, callback in bindings.items():
             self.input.bind(sequence, callback)
@@ -592,6 +594,7 @@ class App:
     def toggle_vim_mode(self):
         self._vim_insert = True
         self._vim_pending = ""
+        self._vim_register = None
         self.update_vim_status()
         self.input.focus_set()
 
@@ -616,13 +619,21 @@ class App:
             return None
 
         key = event.char or event.keysym
-        if self._vim_pending == "d":
+        if self._vim_pending in ("d", "y"):
+            command = self._vim_pending
             self._vim_pending = ""
-            if key == "d":
-                self.vim_delete_line()
+            if key == command:
+                if command == "d":
+                    self.vim_delete_line()
+                else:
+                    self.vim_yank_line()
             return "break"
         if key == "d":
             self._vim_pending = "d"
+        elif key == "y":
+            self._vim_pending = "y"
+        elif key == "p":
+            self.vim_paste_line()
         elif key == "i":
             self._vim_insert = True
         elif key == "a":
@@ -653,12 +664,26 @@ class App:
 
     def vim_delete_line(self):
         start = self.input.index("insert linestart")
+        line_end = self.input.index("insert lineend")
+        self._vim_register = self.input.get(start, line_end)
         end = self.input.index("insert lineend + 1c")
-        if self.input.compare(end, ">=", "end-1c"):
-            start = self.input.index("insert linestart")
-            self.input.delete(start, end)
-        else:
-            self.input.delete(start, end)
+        self.input.delete(start, end)
+
+    def vim_yank_line(self):
+        start = self.input.index("insert linestart")
+        end = self.input.index("insert lineend")
+        self._vim_register = self.input.get(start, end)
+
+    def vim_paste_line(self):
+        if self._vim_register is None:
+            return
+        line = int(self.input.index("insert linestart").split(".")[0])
+        self.input.insert("insert lineend", "\n" + self._vim_register)
+        self.input.mark_set(tk.INSERT, "%d.0" % (line + 1))
+
+    def delete_to_line_start(self, _event=None):
+        self.input.delete("insert linestart", "insert")
+        return "break"
 
     def select_all_input(self, _event=None):
         self.input.focus_set()
