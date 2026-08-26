@@ -416,8 +416,11 @@ class App:
         self.byte_order_var = tk.StringVar(value="MSB-first")
         self.search_var = tk.StringVar()
         self.anomalies_only_var = tk.BooleanVar(value=False)
+        self.vim_mode_var = tk.BooleanVar(value=False)
         self._debounce = None
         self._anomaly_items = []
+        self._vim_insert = True
+        self._vim_pending = ""
 
         top = ttk.Frame(root, padding=(8, 6))
         top.pack(fill="x")
@@ -436,6 +439,8 @@ class App:
                                    lambda _event: self.schedule_parse())
         ttk.Button(top, text="Load file...", command=self.load_file).pack(side="right")
         ttk.Button(top, text="Clear", command=self.clear_all).pack(side="right", padx=6)
+        ttk.Checkbutton(top, text="Vim mode", variable=self.vim_mode_var,
+                        command=self.toggle_vim_mode).pack(side="right", padx=6)
 
         filters = ttk.Frame(root, padding=(8, 0, 8, 4))
         filters.pack(fill="x")
@@ -450,6 +455,8 @@ class App:
                         variable=self.anomalies_only_var,
                         command=self.parse).pack(side="left", padx=12)
         ttk.Button(filters, text="Next anomaly", command=self.next_anomaly).pack(side="right")
+        self.vim_status = ttk.Label(filters, text="INSERT")
+        self.vim_status.pack(side="right", padx=10)
 
         self.status = ttk.Label(root, anchor="w", padding=(8, 3), relief="sunken")
         self.status.pack(fill="x", side="bottom")
@@ -579,6 +586,79 @@ class App:
         self.input_menu.add_command(label="Copy", command=self.copy_input)
         self.input_menu.add_command(label="Paste", command=self.paste_input)
         self.input.bind("<Button-3>", self.show_input_menu)
+        self.input.bind("<Escape>", self.vim_escape)
+        self.input.bind("<Key>", self.handle_vim_key)
+
+    def toggle_vim_mode(self):
+        self._vim_insert = True
+        self._vim_pending = ""
+        self.update_vim_status()
+        self.input.focus_set()
+
+    def update_vim_status(self):
+        if not self.vim_mode_var.get():
+            self.vim_status.configure(text="")
+        else:
+            self.vim_status.configure(text="INSERT" if self._vim_insert else "NORMAL")
+
+    def vim_escape(self, _event=None):
+        if self.vim_mode_var.get():
+            self._vim_insert = False
+            self._vim_pending = ""
+            self.update_vim_status()
+            return "break"
+        return None
+
+    def handle_vim_key(self, event):
+        if not self.vim_mode_var.get() or event.state & (0x0004 | 0x0008):
+            return None
+        if self._vim_insert:
+            return None
+
+        key = event.char or event.keysym
+        if self._vim_pending == "d":
+            self._vim_pending = ""
+            if key == "d":
+                self.vim_delete_line()
+            return "break"
+        if key == "d":
+            self._vim_pending = "d"
+        elif key == "i":
+            self._vim_insert = True
+        elif key == "a":
+            self.input.mark_set(tk.INSERT, "insert + 1c")
+            self._vim_insert = True
+        elif key == "o":
+            self.input.insert("insert lineend", "\n")
+            self.input.mark_set(tk.INSERT, "insert lineend + 1c")
+            self._vim_insert = True
+        elif key == "h":
+            self.input.mark_set(tk.INSERT, "insert - 1c")
+        elif key == "l":
+            self.input.mark_set(tk.INSERT, "insert + 1c")
+        elif key == "j":
+            self.input.mark_set(tk.INSERT, "insert + 1 line")
+        elif key == "k":
+            self.input.mark_set(tk.INSERT, "insert - 1 line")
+        elif key == "x":
+            self.input.delete("insert", "insert + 1c")
+        elif key == "0":
+            self.input.mark_set(tk.INSERT, "insert linestart")
+        elif key == "$":
+            self.input.mark_set(tk.INSERT, "insert lineend")
+        else:
+            return "break"
+        self.update_vim_status()
+        return "break"
+
+    def vim_delete_line(self):
+        start = self.input.index("insert linestart")
+        end = self.input.index("insert lineend + 1c")
+        if self.input.compare(end, ">=", "end-1c"):
+            start = self.input.index("insert linestart")
+            self.input.delete(start, end)
+        else:
+            self.input.delete(start, end)
 
     def select_all_input(self, _event=None):
         self.input.focus_set()

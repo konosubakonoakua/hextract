@@ -60,6 +60,10 @@ copies, Ctrl+X cuts, Ctrl+V pastes, Ctrl+Z undoes, Ctrl+Y (or Ctrl+Shift+Z)
 redoes, and Ctrl+F focuses the search box. Right-clicking the input opens the
 same editing actions in a context menu.
 
+Optional Vim mode can be enabled in the GUI. It starts in INSERT mode; press
+Esc for NORMAL mode. The initial NORMAL commands are `i`, `a`, `o`, `h`, `j`,
+`k`, `l`, `x`, `dd`, `0`, and `$`.
+
 ## Bundled formats
 
 | file | packet | layout |
