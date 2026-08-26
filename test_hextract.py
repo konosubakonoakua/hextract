@@ -176,6 +176,12 @@ class TestRules(unittest.TestCase):
         self.assertTrue(hx.eval_rule(r[1], self.env((0, 0, 0, 0, 0, 0), (1, 0, 0, 0, 0, 0))))
         self.assertTrue(hx.eval_rule(r[2], self.env((0, 0, 0, 0, 0, 0), (0, 0, 0, 0, 0, 0))))
 
+    def test_rule_color_takes_precedence_over_stripe(self):
+        row = {"integral": (-1, 0, 0, 0, 0, 0),
+               "count": (0, 0, 0, 0, 0, 0)}
+        self.assertEqual(hx.row_tags(self.fmt, row, 0), ["rule0"])
+        self.assertEqual(hx.row_tags(self.fmt, row, 1), ["stripe", "rule0"])
+
     def _reject(self, when):
         with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as fh:
             fh.write('[format]\nname = "x"\nword_bits = 8\n[[field]]\nname = "a"\ntype = "u8"\n'
@@ -256,7 +262,7 @@ class TestGui(unittest.TestCase):
             self.assertEqual(len(kids), 3)
             self.assertEqual(len(app.tree["columns"]), 17)
             self.assertEqual(app.tree.item(kids[0], "tags")[0], "rule1")  # has count
-            self.assertEqual(app.tree.item(kids[1], "tags")[0], "rule0")  # negative
+            self.assertEqual(app.tree.item(kids[1], "tags"), ("stripe", "rule0"))  # negative
             self.assertEqual(app.tree.item(kids[2], "tags")[0], "rule2")  # all zero
         finally:
             root.destroy()

@@ -302,6 +302,17 @@ def rule_env(fmt, row):
     return env
 
 
+def row_tags(fmt, row, idx):
+    # Add the stripe first so a matching rule, added later, takes precedence.
+    tags = ["stripe"] if idx % 2 == 1 else []
+    env = rule_env(fmt, row)
+    for i, rule in enumerate(fmt.rules):
+        if eval_rule(rule, env):
+            tags.append("rule%d" % i)
+            break
+    return tags
+
+
 def format_cell(field, value):
     if field.scale is not None:
         value = value * field.scale
@@ -526,14 +537,7 @@ class App:
                     vals.append(format_cell(f, v))
                 else:
                     vals.extend(format_cell(f, x) for x in v)
-            tags = []
-            env = rule_env(fmt, row)
-            for i, rule in enumerate(fmt.rules):
-                if eval_rule(rule, env):
-                    tags.append("rule%d" % i)
-                    break
-            if idx % 2 == 1:
-                tags.append("stripe")
+            tags = row_tags(fmt, row, idx)
             self.tree.insert("", "end", values=vals, tags=tags)
 
         msg = "%d words x %d B (%s)" % (len(rows), fmt.word_bytes, fmt.name)
